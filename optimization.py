@@ -26,10 +26,10 @@ try:
 except:
   hvd = None
 
-def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd = False, optimizer_type="adam"):
+def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd = False, optimizer_type="adam", reduce_type="average"):
   """Creates an optimizer training op."""
   global_step = tf.train.get_or_create_global_step()
-
+  
   learning_rate = tf.constant(value=init_lr, shape=[], dtype=tf.float32)
 
   # Implements linear decay of the learning rate.
@@ -86,8 +86,13 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
   if use_hvd:
     # [HVD] Wrap the original optimizer by Horovod's distributed optimizer, which handles all the under the hood allreduce calls. 
     # Notice Horovod only does synchronized parameter update.
-    optimizer = hvd.DistributedOptimizer(optimizer)
-
+    if reduce_type == "average":
+        print("Using average reduction for gradients")
+        optimizer = hvd.DistributedOptimizer(optimizer)
+    else:
+        print("Using adasum reduction for gradients")
+        optimizer = hvd.DistributedOptimizer(optimizer, op=hvd.Adasum)
+        
   if use_tpu:
     optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
 
