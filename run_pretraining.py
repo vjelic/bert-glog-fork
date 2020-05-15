@@ -114,7 +114,7 @@ flags.DEFINE_integer(
     
 flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
 
-flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default) or lamb")
+flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default), lamb, nadam and nlamb")
 
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
