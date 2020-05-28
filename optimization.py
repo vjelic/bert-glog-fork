@@ -20,15 +20,15 @@ from __future__ import print_function
 
 import re
 import tensorflow as tf
-tf.compat.v1.disable_resource_variables()
 tf.compat.v1.disable_eager_execution()
 
 try:
   import horovod.tensorflow as hvd
+  from horovod.tensorflow.compression import Compression
 except:
   hvd = None
 
-def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd=False, optimizer_type="adam"):
+def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd=False, optimizer_type="adam", use_amp=False):
   """Creates an optimizer training op."""
   global_step = tf.compat.v1.train.get_or_create_global_step()
 
@@ -114,10 +114,14 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
   if use_hvd:
     # [HVD] Wrap the original optimizer by Horovod's distributed optimizer, which handles all the under the hood allreduce calls. 
     # Notice Horovod only does synchronized parameter update.
-    optimizer = hvd.DistributedOptimizer(optimizer)
+    optimizer = hvd.DistributedOptimizer(optimizer, sparse_as_dense=True, compression=Compression.fp16 if (use_amp) else Compression.none)
 
   if use_tpu:
     optimizer = tf.compat.v1.tpu.CrossShardOptimizer(optimizer)
+
+  if use_amp:
+    optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
+    loss_scale = tf.identity(optimizer._loss_scale(), name='amp_loss_scale')
 
   tvars = tf.compat.v1.trainable_variables()
   if use_hvd:
