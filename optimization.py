@@ -18,17 +18,19 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
 import re
 import tensorflow as tf
-tf.compat.v1.disable_resource_variables()
-tf.compat.v1.disable_eager_execution()
 
 try:
   import horovod.tensorflow as hvd
+  from horovod.tensorflow.compression import Compression
 except:
   hvd = None
 
-def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd=False, optimizer_type="adam"):
+from cond_xla import conditional_xla
+
+def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd=False, optimizer_type="adam", use_fp16=False, manual_fp16=False):
   """Creates an optimizer training op."""
   global_step = tf.compat.v1.train.get_or_create_global_step()
 
@@ -43,7 +45,7 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
     power = 1.0
   else:
     power = 0.5
-    
+
   learning_rate = tf.compat.v1.train.polynomial_decay(
       learning_rate,
       global_step,
@@ -51,9 +53,6 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
       end_learning_rate=0.0,
       power=power,
       cycle=False)
-  # if use_hvd:
-  #   # May want to scale learning rate by number of GPUs
-  #   learning_rate *= hvd.size()
 
   # Implements linear warmup. I.e., if global_step < num_warmup_steps, the
   # learning rate will be `global_step/num_warmup_steps * init_lr`.
@@ -82,7 +81,9 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
         beta_1=0.9,
         beta_2=0.999,
         epsilon=1e-6,
-        exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
+        exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"],
+        use_fp16=use_fp16,
+        manual_fp16=manual_fp16)
   elif optimizer_type == "lamb":
     print("Initializing LAMB Optimizer")
     optimizer = LAMBOptimizer(
@@ -110,14 +111,23 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
         beta_2=0.999,
         epsilon=1e-6,
         exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
-      
+
+#  if manual_fp16 or use_fp16:
+#    os.environ["TF_ENABLE_AUTO_MIXED_PRECISION_GRAPH_REWRITE"] = "1"
+
+#  if use_fp16:
+#    optimizer=tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
+
   if use_hvd:
     # [HVD] Wrap the original optimizer by Horovod's distributed optimizer, which handles all the under the hood allreduce calls. 
     # Notice Horovod only does synchronized parameter update.
-    optimizer = hvd.DistributedOptimizer(optimizer)
+    optimizer = hvd.DistributedOptimizer(optimizer, sparse_as_dense=True, compression=Compression.fp16 if (use_fp16 or manual_fp16) else Compression.none)
 
   if use_tpu:
     optimizer = tf.compat.v1.tpu.CrossShardOptimizer(optimizer)
+
+  if manual_fp16 or use_fp16:
+    optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
 
   tvars = tf.compat.v1.trainable_variables()
   if use_hvd:
@@ -137,8 +147,26 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, 
   # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
   # a different optimizer, you should probably take this line out.
   new_global_step = global_step + 1
+  new_global_step = tf.identity(new_global_step, name='step_update')
   train_op = tf.group(train_op, [global_step.assign(new_global_step)])
   return train_op
+
+@conditional_xla()
+def apply_adam_with_decay(beta_1, beta_2, learning_rate, epsilon, do_decay, weight_decay_rate, grad, m, v, param):
+      # Standard Adam update.
+      next_m = (
+          tf.multiply(beta_1, m) + tf.multiply(1.0 - beta_1, grad))
+      next_v = (
+          tf.multiply(beta_2, v) + tf.multiply(1.0 - beta_2,
+                                                    tf.square(grad)))
+      update = next_m / (tf.sqrt(next_v) + epsilon)
+      if do_decay:
+        update += weight_decay_rate * param
+
+      update_with_lr = learning_rate * update
+
+      next_param = param - update_with_lr
+      return next_param, next_m, next_v
 
 class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
   """A basic Adam optimizer that includes "correct" L2 weight decay."""
@@ -150,17 +178,29 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
                beta_2=0.999,
                epsilon=1e-6,
                exclude_from_weight_decay=None,
-               name="AdamWeightDecayOptimizer"):
+               name="AdamWeightDecayOptimizer",
+               use_fp16=False,
+               manual_fp16=False):
     """Constructs a AdamWeightDecayOptimizer."""
     super(AdamWeightDecayOptimizer, self).__init__(False, name)
+<<<<<<< HEAD
 
     self.learning_rate = tf.identity(learning_rate, name='learning_rate')
     self.weight_decay_rate = weight_decay_rate
     self.beta_1 = beta_1
     self.beta_2 = beta_2
     self.epsilon = epsilon
+=======
+    self.learning_rate = tf.identity(learning_rate, name='learning_rate')
+    self.weight_decay_on = (weight_decay_rate!=0.0)
+    self.weight_decay_rate = tf.constant(weight_decay_rate)
+    self.beta_1 = tf.constant(beta_1)
+    self.beta_2 = tf.constant(beta_2)
+    self.epsilon = tf.constant(epsilon)
+>>>>>>> Adding support of XLA
     self.exclude_from_weight_decay = exclude_from_weight_decay
-
+    self.use_fp16 = use_fp16
+    self.manual_fp16 = manual_fp16
   def apply_gradients(self, grads_and_vars, global_step=None, name=None):
     """See base class."""
     assignments = []
@@ -169,6 +209,17 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
         continue
 
       param_name = self._get_variable_name(param.name)
+
+      has_shadow = self.manual_fp16 and param.dtype.base_dtype != tf.float32
+      if has_shadow:
+        # create shadow fp32 weights for fp16 variable
+        param_fp32 = tf.compat.v1.get_variable(
+            name=param_name + "/shadow",
+            dtype=tf.float32,
+            trainable=False,
+            initializer=tf.cast(param.initialized_value(),tf.float32))
+      else:
+        param_fp32 = param
 
       m = tf.compat.v1.get_variable(
           name=param_name + "/adam_m",
@@ -183,38 +234,24 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
           trainable=False,
           initializer=tf.compat.v1.zeros_initializer())
 
-      # Standard Adam update.
-      next_m = (
-        tf.multiply(self.beta_1, m) + tf.multiply(1.0 - self.beta_1, grad))
-      next_v = (
-        tf.multiply(self.beta_2, v) + tf.multiply(1.0 - self.beta_2,
-                                                    tf.square(grad)))
+      next_param, next_m, next_v = apply_adam_with_decay(self.beta_1, 
+        self.beta_2, self.learning_rate, self.epsilon, 
+        self._do_use_weight_decay(param_name),
+        self.weight_decay_rate, grad, m, v, param)
 
-      update = next_m / (tf.sqrt(next_v) + self.epsilon)
-
-      # Just adding the square of the weights to the loss function is *not*
-      # the correct way of using L2 regularization/weight decay with Adam,
-      # since that will interact with the m and v parameters in strange ways.
-      #
-      # Instead we want ot decay the weights in a manner that doesn't interact
-      # with the m/v parameters. This is equivalent to adding the square
-      # of the weights to the loss with plain (non-momentum) SGD.
-      if self._do_use_weight_decay(param_name):
-        update += self.weight_decay_rate * param
-
-      update_with_lr = self.learning_rate * update
-
-      next_param = param - update_with_lr
+      if has_shadow:
+        # cast shadow fp32 weights to fp16 and assign to trainable variable
+        param.assign(tf.cast(next_param, param.dtype.base_dtype))
 
       assignments.extend(
-        [param.assign(next_param),
+        [param_fp32.assign(next_param),
           m.assign(next_m),
           v.assign(next_v)])
     return tf.group(*assignments, name=name)
 
   def _do_use_weight_decay(self, param_name):
     """Whether to use L2 weight decay for `param_name`."""
-    if not self.weight_decay_rate:
+    if not self.weight_decay_on:
       return False
     if self.exclude_from_weight_decay:
       for r in self.exclude_from_weight_decay:
@@ -229,6 +266,49 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
       param_name = m.group(1)
     return param_name
 
+@conditional_xla()
+def apply_lamb(beta_1, beta_2, learning_rate, epsilon, do_decay, weight_decay_rate, grad, m, v, param):
+      # Standard Adam update.
+      next_m = (
+          tf.multiply(beta_1, m) + tf.multiply(1.0 - beta_1, grad))
+      next_v = (
+          tf.multiply(beta_2, v) + tf.multiply(1.0 - beta_2,
+                                                    tf.square(grad)))
+
+      update = next_m / (tf.sqrt(next_v) + epsilon)
+
+      # Just adding the square of the weights to the loss function is *not*
+      # the correct way of using L2 regularization/weight decay with Adam,
+      # since that will interact with the m and v parameters in strange ways.
+      #
+      # Instead we want ot decay the weights in a manner that doesn't interact
+      # with the m/v parameters. This is equivalent to adding the square
+      # of the weights to the loss with plain (non-momentum) SGD.
+      if do_decay:
+        update += weight_decay_rate * param
+
+      ############## BELOW ARE THE SPECIFIC PARTS FOR LAMB ##############
+
+      # Note: Here are two choices for scaling function \phi(z)
+      # minmax:   \phi(z) = min(max(z, \gamma_l), \gamma_u)
+      # identity: \phi(z) = z
+      # The authors does not mention what is \gamma_l and \gamma_u
+      # UPDATE: after asking authors, they provide me the code below.
+      # ratio = array_ops.where(math_ops.greater(w_norm, 0), array_ops.where(
+      #      math_ops.greater(g_norm, 0), (w_norm / g_norm), 1.0), 1.0)
+
+      r1 = tf.sqrt(tf.reduce_sum(input_tensor=tf.square(param)))
+      r2 = tf.sqrt(tf.reduce_sum(input_tensor=tf.square(update)))
+
+      r = tf.compat.v1.where(tf.greater(r1, 0.0), tf.compat.v1.where(
+        tf.greater(r2, 0.0), r1/r2, 1.0), 1.0)
+
+      eta = learning_rate * r
+
+      update_with_lr = eta * update
+
+      next_param = param - update_with_lr
+      return next_param, next_m, next_v
 
 class LAMBOptimizer(tf.compat.v1.train.Optimizer):
   """
@@ -282,47 +362,10 @@ class LAMBOptimizer(tf.compat.v1.train.Optimizer):
           dtype=tf.float32,
           trainable=False,
           initializer=tf.compat.v1.zeros_initializer())
-
-      # Standard Adam update.
-      next_m = (
-          tf.multiply(self.beta_1, m) + tf.multiply(1.0 - self.beta_1, grad))
-      next_v = (
-          tf.multiply(self.beta_2, v) + tf.multiply(1.0 - self.beta_2,
-                                                    tf.square(grad)))
-
-      update = next_m / (tf.sqrt(next_v) + self.epsilon)
-
-      # Just adding the square of the weights to the loss function is *not*
-      # the correct way of using L2 regularization/weight decay with Adam,
-      # since that will interact with the m and v parameters in strange ways.
-      #
-      # Instead we want ot decay the weights in a manner that doesn't interact
-      # with the m/v parameters. This is equivalent to adding the square
-      # of the weights to the loss with plain (non-momentum) SGD.
-      if self._do_use_weight_decay(param_name):
-        update += self.weight_decay_rate * param
-
-      ############## BELOW ARE THE SPECIFIC PARTS FOR LAMB ##############
-
-      # Note: Here are two choices for scaling function \phi(z)
-      # minmax:   \phi(z) = min(max(z, \gamma_l), \gamma_u)
-      # identity: \phi(z) = z
-      # The authors does not mention what is \gamma_l and \gamma_u
-      # UPDATE: after asking authors, they provide me the code below.
-      # ratio = array_ops.where(math_ops.greater(w_norm, 0), array_ops.where(
-      #      math_ops.greater(g_norm, 0), (w_norm / g_norm), 1.0), 1.0)
-
-      r1 = tf.sqrt(tf.reduce_sum(input_tensor=tf.square(param)))
-      r2 = tf.sqrt(tf.reduce_sum(input_tensor=tf.square(update)))
-
-      r = tf.compat.v1.where(tf.greater(r1, 0.0), tf.compat.v1.where(
-        tf.greater(r2, 0.0), r1/r2, 1.0), 1.0)
-
-      eta = self.learning_rate * r
-
-      update_with_lr = eta * update
-
-      next_param = param - update_with_lr
+      next_param, next_m, next_v = apply_lamb(self.beta_1, self.beta_2,
+          self.learning_rate, self.epsilon,
+          self._do_use_weight_decay(param_name),
+          self.weight_decay_rate, grad, m, v, param)
 
       assignments.extend(
           [param.assign(next_param),

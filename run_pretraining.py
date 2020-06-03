@@ -19,15 +19,13 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import modeling
-import optimization
+import sys
+import time
 import tensorflow as tf
-tf.compat.v1.disable_resource_variables()
-tf.compat.v1.disable_eager_execution()
-
 import time
 from tensorflow.python.training.summary_io import SummaryWriterCache
 from tensorflow.core.framework.summary_pb2 import Summary
+from tensorflow.core.protobuf import rewriter_config_pb2
 
 # Add Horovod to run_pretraining
 try:
@@ -37,7 +35,19 @@ except:
 
 flags = tf.compat.v1.flags
 
-FLAGS = flags.FLAGS
+
+import multiprocessing.spawn
+_old_preparation_data = multiprocessing.spawn.get_preparation_data
+
+def _patched_preparation_data(name):
+    try:
+        return _old_preparation_data(name)
+    except AttributeError:
+        main_module = sys.modules['__main__']
+        # Any string for __spec__ does the job
+        main_module.__spec__ = ''
+        return _old_preparation_data(name)
+multiprocessing.spawn.get_preparation_data = _patched_preparation_data
 
 ## Required parameters
 flags.DEFINE_string(
@@ -57,6 +67,9 @@ flags.DEFINE_string(
 flags.DEFINE_string(
     "init_checkpoint", None,
     "Initial checkpoint (usually from a pre-trained BERT model).")
+
+flags.DEFINE_string(
+    "eval_filename", None, "Eval output filename")
 
 flags.DEFINE_integer(
     "max_seq_length", 128,
@@ -83,7 +96,7 @@ flags.DEFINE_integer("num_train_steps", 100000, "Number of training steps.")
 
 flags.DEFINE_integer("num_warmup_steps", 10000, "Number of warmup steps.")
 
-flags.DEFINE_integer("save_checkpoints_steps", 1000,
+flags.DEFINE_integer("save_checkpoints_steps", 25000,
                      "How often to save the model checkpoint.")
 
 flags.DEFINE_integer("iterations_per_loop", 1000,
@@ -92,6 +105,8 @@ flags.DEFINE_integer("iterations_per_loop", 1000,
 flags.DEFINE_integer("max_eval_steps", 100, "Maximum number of eval steps.")
 
 flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
+
+flags.DEFINE_integer("use_xla", 0, "XLA optimizations: 0 - off, 1 - restricted, 2 - full")
 
 flags.DEFINE_string(
     "tpu_name", None,
@@ -116,7 +131,11 @@ flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
 flags.DEFINE_integer(
     "num_tpu_cores", 8,
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
-    
+
+flags.DEFINE_bool("use_fp16", False, "Whether to use FP16 via AMP.")
+
+flags.DEFINE_bool("manual_fp16", False, "Whether to use NVIDIA manual FP16.")
+
 flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
 
 flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default), lamb, nadam and nlamb")
@@ -125,6 +144,15 @@ flags.DEFINE_integer(
     "num_report_steps", 10,
     "How frequently should summary information be reported and recorded.")
 
+FLAGS = flags.FLAGS
+
+import cond_xla
+# must be done _before_ we import modeling or optimization
+# (otherwise use_xla won't stick)
+cond_xla.use_xla = FLAGS.use_xla
+
+import modeling
+import optimization
 
 class LogSessionRunHook(tf.estimator.SessionRunHook):
 
@@ -186,7 +214,6 @@ flags.DEFINE_integer("num_timeline_steps", 1,
                      "Only used if `enable_timeline` is True. "
                      "Generate timeline for every Nth step.")
 
-
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
                      use_one_hot_embeddings, use_hvd):
@@ -215,7 +242,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         input_ids=input_ids,
         input_mask=input_mask,
         token_type_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings)
+        use_one_hot_embeddings=use_one_hot_embeddings,
+        compute_type=tf.float16 if FLAGS.manual_fp16 else tf.float32)
 
     (masked_lm_loss,
      masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
@@ -226,12 +254,10 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
      next_sentence_log_probs) = get_next_sentence_output(
          bert_config, model.get_pooled_output(), next_sentence_labels)
 
+    masked_lm_loss = tf.identity(masked_lm_loss, name="mlm_loss")
+    next_sentence_loss = tf.identity(next_sentence_loss, name="nsp_loss")
     total_loss = masked_lm_loss + next_sentence_loss
-
-    masked_lm_loss = tf.identity(masked_lm_loss, name='mlm_loss')
-    next_sentence_loss = tf.identity(next_sentence_loss, name='nsp_loss')
     total_loss = tf.identity(total_loss, name='total_loss')
-
     tvars = tf.compat.v1.trainable_variables()
 
     initialized_variable_names = {}
@@ -250,17 +276,22 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         tf.compat.v1.train.init_from_checkpoint(init_checkpoint, assignment_map)
 
     tf.compat.v1.logging.info("**** Trainable Variables ****")
+    row = 0
     for var in tvars:
       init_string = ""
       if var.name in initialized_variable_names:
         init_string = ", *INIT_FROM_CKPT*"
-      tf.compat.v1.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+      if row<10 or row>len(tvars)-10:
+        tf.compat.v1.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
                       init_string)
+      if row==10:
+        tf.compat.v1.logging.info("...")
+      row+=1
 
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type)
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type, use_fp16=FLAGS.use_fp16, manual_fp16=FLAGS.manual_fp16)
 
       output_spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
@@ -454,9 +485,6 @@ def input_fn_builder(input_files,
       d = d.shuffle(buffer_size=100)
     else:
       d = tf.data.TFRecordDataset(input_files)
-      # Since we evaluate for a fixed number of steps we don't want to encounter
-      # out-of-range exceptions.
-      d = d.repeat()
 
     # We must `drop_remainder` on training because the TPU requires fixed
     # size dimensions. For eval, we assume we are evaluating on the CPU or GPU
@@ -487,13 +515,11 @@ def _decode_record(record, name_to_features):
 
   return example
 
-
 def main(_):
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
   # disable the log messages from being printed twice
   tf.compat.v1.get_logger().propagate = False
-
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
     use_hvd = True
@@ -512,7 +538,6 @@ def main(_):
     raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
-
   tf.io.gfile.makedirs(FLAGS.output_dir)
 
   input_files = []
@@ -520,8 +545,11 @@ def main(_):
     input_files.extend(tf.io.gfile.glob(input_pattern))
 
   tf.compat.v1.logging.info("*** Input Files ***")
+  row=0
   for input_file in input_files:
-    tf.compat.v1.logging.info("  %s" % input_file)
+    if row<10 or row>len(input_files)-10:
+      tf.compat.v1.logging.info("  %s" % input_file)
+    row+=1
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:
@@ -530,10 +558,12 @@ def main(_):
 
   is_per_host = tf.compat.v1.estimator.tpu.InputPipelineConfig.PER_HOST_V2
 
-  config = None
+  config = tf.compat.v1.ConfigProto()
+  if FLAGS.use_xla==2:
+    config.graph_options.optimizer_options.global_jit_level = tf.compat.v1.OptimizerOptions.ON_1
+    config.graph_options.rewrite_options.memory_optimization = rewriter_config_pb2.RewriterConfig.NO_MEM_OPT
   if use_hvd:
     # [HVD] Pin each worker to a GPU (make sure one worker uses only one GPU).
-    config = tf.compat.v1.ConfigProto()
     config.gpu_options.visible_device_list = str(hvd.local_rank())
 
   run_config = tf.compat.v1.estimator.tpu.RunConfig(
@@ -605,9 +635,9 @@ def main(_):
         is_training=False)
 
     result = estimator.evaluate(
-        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps if FLAGS.max_eval_steps>0 else None)
 
-    output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
+    output_eval_file = os.path.join(FLAGS.output_dir, FLAGS.eval_filename or "eval_results.txt")
     with tf.io.gfile.GFile(output_eval_file, "w") as writer:
       tf.compat.v1.logging.info("***** Eval results *****")
       for key in sorted(result.keys()):
