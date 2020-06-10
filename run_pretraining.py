@@ -481,7 +481,10 @@ def _decode_record(record, name_to_features):
 
 def main(_):
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
-  
+
+  # disable the log messages from being printed twice
+  tf.compat.v1.get_logger().propagate = False
+
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
     use_hvd = True
