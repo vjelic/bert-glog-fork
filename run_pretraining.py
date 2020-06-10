@@ -116,6 +116,9 @@ flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
 
 flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default), lamb, nadam and nlamb")
 
+flags.DEFINE_integer(
+    "num_report_steps", 10,
+    "How frequently should summary information be reported and recorded.")
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
@@ -468,7 +471,7 @@ def main(_):
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
           per_host_input_for_training=is_per_host),
-      log_step_count_steps=25,
+      log_step_count_steps=FLAGS.num_report_steps * FLAGS.iterations_per_loop,
       session_config=config)
 
   model_fn = model_fn_builder(
