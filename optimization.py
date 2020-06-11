@@ -21,6 +21,7 @@ from __future__ import print_function
 import re
 import tensorflow as tf
 tf.compat.v1.disable_resource_variables()
+tf.compat.v1.disable_eager_execution()
 
 try:
   import horovod.tensorflow as hvd

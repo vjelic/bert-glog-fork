@@ -23,6 +23,7 @@ import modeling
 import optimization
 import tensorflow as tf
 tf.compat.v1.disable_resource_variables()
+tf.compat.v1.disable_eager_execution()
 
 import time
 from tensorflow.python.training.summary_io import SummaryWriterCache
@@ -176,6 +177,14 @@ class LogSessionRunHook(tf.estimator.SessionRunHook):
         self._log_and_record(global_step, learning_rate, total_loss, mlm_loss, nsp_loss)
         self.elapsed_secs = 0.
         self.count = 0
+
+
+flags.DEFINE_bool("enable_timeline", False,
+                  "Whether to enable generation of profiling data.")
+
+flags.DEFINE_integer("num_timeline_steps", 1,
+                     "Only used if `enable_timeline` is True. "
+                     "Generate timeline for every Nth step.")
 
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
@@ -568,12 +577,21 @@ def main(_):
         is_training=True)
 
     hooks = []
+
     if (not use_hvd) or (hvd.rank() == 0):
       global_batch_size = FLAGS.train_batch_size if not use_hvd else FLAGS.train_batch_size * hvd.size()
       hooks.append(LogSessionRunHook(global_batch_size, FLAGS.num_report_steps, FLAGS.output_dir))
+
     if use_hvd:
       # [HVD] Ensure all GPU's start with the same weights.
       hooks.append(hvd.BroadcastGlobalVariablesHook(0))
+
+    if FLAGS.enable_timeline:
+      profiler_hook = tf.estimator.ProfilerHook(
+        save_steps=FLAGS.num_timeline_steps,
+        output_dir=FLAGS.output_dir)
+      hooks.append(profiler_hook)
+
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps, hooks=hooks)
 
   if FLAGS.do_eval:
