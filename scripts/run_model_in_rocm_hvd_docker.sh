@@ -8,10 +8,11 @@ SEQ=128
 # Batch size can be anything that fits the GPU
 BATCH=8
 # NP is the number of GPUs used. Set to equal or less than the number of GPUs on system.
-NP=2
+NP=8
 
 # Container image used
-IMAGE="rocm/tensorflow:rocm3.3-tf2.1-ofed4.6-openmpi4.0.0-horovod"
+#IMAGE="rocm/tensorflow:rocm3.5-tf2.2-ofed4.6-openmpi4.0.0-horovod"
+IMAGE="rocm/tensorflow-private:rocm3.5-tf2.2-enhanced-amp-dev-horovod"
 
 # Print a message
 echo "This script will run the $MODEL model in a ROCm container. "
@@ -102,7 +103,7 @@ CUR_TRAINING=${DATA_SOURCE_NAME}_ba${BATCH}_seq${SEQ}
 mkdir -p $TRAIN_DIR/$CUR_TRAINING
 OUTPUT_FILE_REL=$CUR_TRAINING/$CUR_TRAINING.txt
 
-TRAIN_STEPS=200
+TRAIN_STEPS=1600
 WARMUP_STEPS=50
 LEARNING_RATE=2e-5
 
@@ -138,6 +139,7 @@ if [ ! -f "$OUTPUT_FILE" ]; then
   docker exec $CTNRNAME \
   python3 $CODE_DIR_INSIDE/scripts/calc_performance_metrics.py \
     $TRAIN_DIR_INSIDE/$OUTPUT_FILE_REL $SEQ $BATCH $NP
+  cat $TRAIN_DIR_INSIDE/$OUTPUT_FILE_REL | grep "INFO:tensorflow:examples/sec" | tail -n +2 - | cut -d" " -f2| awk '{ total += 1/$1; count++ } END { print 4*total*(count+1)/count }' 
 fi
 
 # Cleaning up
