@@ -6,9 +6,11 @@ MODEL="bert_large"
 # Sequence length can be 128, 256, 512, or other number of choice
 SEQ=128
 # Batch size can be anything that fits the GPU
-BATCH=8
+BATCH=36
 # NP is the number of GPUs used. Set to equal or less than the number of GPUs on system.
 NP=8
+# Auto mixed precision (True or False)
+AMP=True
 
 # Container image used
 #IMAGE="rocm/tensorflow:rocm3.5-tf2.2-ofed4.6-openmpi4.0.0-horovod"
@@ -130,6 +132,7 @@ python3 $CODE_DIR_INSIDE/run_pretraining.py \
   --num_train_steps=$TRAIN_STEPS \
   --num_warmup_steps=$WARMUP_STEPS \
   --learning_rate=$LEARNING_RATE \
+  --auto_mixed_precision=$AMP \
   2>&1 | tee $TRAIN_DIR/$OUTPUT_FILE_REL
 
 # Calculate performance metrics
