@@ -448,12 +448,12 @@ def input_fn_builder(input_files,
       # even more randomness to the training pipeline.
       d = d.apply(
           tf.data.experimental.parallel_interleave(
-              tf.data.TFRecordDataset,
+              lambda filename: tf.data.TFRecordDataset(filename, compression_type='GZIP'),
               sloppy=is_training,
               cycle_length=cycle_length))
       d = d.shuffle(buffer_size=100)
     else:
-      d = tf.data.TFRecordDataset(input_files)
+      d = tf.data.TFRecordDataset(input_files, compression_type='GZIP')
       # Since we evaluate for a fixed number of steps we don't want to encounter
       # out-of-range exceptions.
       d = d.repeat()

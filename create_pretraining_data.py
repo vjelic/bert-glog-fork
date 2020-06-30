@@ -97,8 +97,9 @@ def write_instance_to_example_files(instances, tokenizer, max_seq_length,
                                     max_predictions_per_seq, output_files):
   """Create TF example files from `TrainingInstance`s."""
   writers = []
+  options = tf.io.TFRecordOptions(compression_type='GZIP')
   for output_file in output_files:
-    writers.append(tf.io.TFRecordWriter(output_file))
+    writers.append(tf.io.TFRecordWriter(output_file, options=options))
 
   writer_index = 0
 
