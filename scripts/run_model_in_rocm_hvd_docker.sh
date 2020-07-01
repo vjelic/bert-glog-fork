@@ -11,7 +11,7 @@ BATCH=8
 NP=2
 
 # Container image used
-IMAGE="rocm/tensorflow:rocm3.3-tf2.1-ofed4.6-openmpi4.0.0-horovod"
+IMAGE="rocm/tensorflow:rocm3.5-tf2.2-ofed4.6-openmpi4.0.0-horovod"
 
 # Print a message
 echo "This script will run the $MODEL model in a ROCm container. "
@@ -129,6 +129,7 @@ python3 $CODE_DIR_INSIDE/run_pretraining.py \
   --num_train_steps=$TRAIN_STEPS \
   --num_warmup_steps=$WARMUP_STEPS \
   --learning_rate=$LEARNING_RATE \
+  --auto_mixed_precision=True \
   2>&1 | tee $TRAIN_DIR/$OUTPUT_FILE_REL
 
 # Calculate performance metrics

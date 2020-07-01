@@ -8,7 +8,8 @@ This BERT repository is a fork from the original [BERT repository by Google](htt
 * Added code to enable Horovod scaling in pre-training, and corresponding script to run
 the pre-training on a cluster;
 * Added optional LAMB and Nesterov LAMB optimizer;
-* Converted the code for TensorFlow v2.
+* Converted the code for TensorFlow v2;
+* Added automatic mixed precision training.
 
 ### A. One file test script
 
@@ -64,6 +65,14 @@ the `--optimizer_type` commandline option set to the following:
 
 The code is converted to use TensorFlow v2. The proper version of TensorFlow should
 be installed on node to run the code on, or in the docker container to be used.
+
+### E. Automatic Mixed Precision (AMP)
+
+Automatic Mixed Precision (AMP) is enabled. This feature can be turned on by using
+the `--auto_mixed_precisioin=True` commandline option with `pre_training.py`,
+`run_squad.py`, and `run_classifier.py`.
+
+Note: This option is used in the "One file test scripts".
 
 ## Below is the original Google README
 

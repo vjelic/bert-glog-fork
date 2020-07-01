@@ -22,7 +22,6 @@ import os
 import modeling
 import optimization
 import tensorflow as tf
-tf.compat.v1.disable_resource_variables()
 tf.compat.v1.disable_eager_execution()
 
 import time
@@ -125,6 +124,15 @@ flags.DEFINE_integer(
     "num_report_steps", 10,
     "How frequently should summary information be reported and recorded.")
 
+flags.DEFINE_bool("enable_timeline", False,
+                  "Whether to enable generation of profiling data.")
+
+flags.DEFINE_integer("num_timeline_steps", 1,
+                     "Only used if `enable_timeline` is True. "
+                     "Generate timeline for every Nth step.")
+flags.DEFINE_bool(
+    "auto_mixed_precision", False,
+    "Whether to enable AMP (Auto Mixed Precision).")
 
 class LogSessionRunHook(tf.estimator.SessionRunHook):
 
@@ -179,17 +187,9 @@ class LogSessionRunHook(tf.estimator.SessionRunHook):
         self.count = 0
 
 
-flags.DEFINE_bool("enable_timeline", False,
-                  "Whether to enable generation of profiling data.")
-
-flags.DEFINE_integer("num_timeline_steps", 1,
-                     "Only used if `enable_timeline` is True. "
-                     "Generate timeline for every Nth step.")
-
-
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings, use_hvd):
+                     use_one_hot_embeddings, use_hvd, use_amp):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -260,7 +260,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type)
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type, use_amp)
 
       output_spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
@@ -494,6 +494,11 @@ def main(_):
   # disable the log messages from being printed twice
   tf.compat.v1.get_logger().propagate = False
 
+  use_amp = False
+  if FLAGS.auto_mixed_precision:
+    use_amp = True
+    tf.compat.v1.logging.info("TF AMP (Auto Mixed Precision) is enabled")
+
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
     use_hvd = True
@@ -556,7 +561,8 @@ def main(_):
       num_warmup_steps=FLAGS.num_warmup_steps,
       use_tpu=FLAGS.use_tpu,
       use_one_hot_embeddings=FLAGS.use_tpu,
-      use_hvd=use_hvd)
+      use_hvd=use_hvd,
+      use_amp=use_amp)
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.

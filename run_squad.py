@@ -28,7 +28,6 @@ import optimization
 import tokenization
 import six
 import tensorflow as tf
-tf.compat.v1.disable_resource_variables()
 tf.compat.v1.disable_eager_execution()
 
 flags = tf.compat.v1.flags
@@ -155,6 +154,9 @@ flags.DEFINE_float(
     "null_score_diff_threshold", 0.0,
     "If null_score - best_non_null is greater than the threshold predict null.")
 
+flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default), lamb, nadam and nlamb")
+
+flags.DEFINE_bool("auto_mixed_precision", False, "Whether to enable AMP (Auto Mixed Precision).")
 
 flags.DEFINE_bool("enable_timeline", False,
                   "Whether to enable generation of profiling data.")
@@ -599,7 +601,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings, use_hvd, use_amp):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -670,7 +672,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
       total_loss = (start_loss + end_loss) / 2.0
 
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAG.optimizer_type, use_amp)
 
       output_spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
@@ -1136,6 +1138,11 @@ def validate_flags_or_throw(bert_config):
 def main(_):
   tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
 
+  use_amp = False
+  if FLAGS.auto_mixed_precision:
+    use_amp = True
+    tf.compat.v1.logging.info("TF AMP (Auto Mixed Precision) is enabled")
+
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
   validate_flags_or_throw(bert_config)
@@ -1183,7 +1190,9 @@ def main(_):
       num_train_steps=num_train_steps,
       num_warmup_steps=num_warmup_steps,
       use_tpu=FLAGS.use_tpu,
-      use_one_hot_embeddings=FLAGS.use_tpu)
+      use_one_hot_embeddings=FLAGS.use_tpu,
+      use_hvd=False,
+      use_amp=use_amp)
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
