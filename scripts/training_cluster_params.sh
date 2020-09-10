@@ -53,7 +53,7 @@ CONFIGS=""
 NP=64
 
 # Initial checkpoint to be loaded by the first stage
-INIT_CKPT=$CODE_DIR/../../run_data/initial_checkpoint
+INIT_CKPT=$CLUSTER_DIR/run_data/initial_checkpoint
 
 # Data directory
 DATA_DIR=/data/wikipedia
@@ -62,9 +62,9 @@ DATA_DIR=/data/wikipedia
 ### Parameters for SQuAD Tuning ###
 ###################################
 
-DO_SQUAD=
+DO_SQUAD=1
 
-SQUAD_NP=8
+SQUAD_NP=3
 
 SQUAD_DATA_DIR=/data/squad/1.1
 
